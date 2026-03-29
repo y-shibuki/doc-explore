@@ -12,10 +12,10 @@ tasks:
       - task: install:frontend
 
   install:backend:
-    desc: Python 依存関係をインストール
+    desc: Python 依存関係をインストール (uv sync)
     dir: "{{.BACKEND_DIR}}"
     cmds:
-      - pip install -e ".[dev]"
+      - uv sync --extra dev
 
   install:frontend:
     desc: Node 依存関係をインストール
@@ -33,7 +33,7 @@ tasks:
     desc: バックエンド開発サーバー起動 (port 8000)
     dir: "{{.BACKEND_DIR}}"
     cmds:
-      - uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+      - uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 
   dev:frontend:
     desc: フロントエンド開発サーバー起動 (port 5173)
@@ -41,11 +41,37 @@ tasks:
     cmds:
       - npx vite --port 5173
 
+  migrate:
+    desc: DBマイグレーションを実行
+    dir: "{{.BACKEND_DIR}}"
+    cmds:
+      - uv run alembic upgrade head
+
+  migrate:create:
+    desc: 新しいマイグレーションファイルを作成 (MESSAGE="変更内容" task migrate:create)
+    dir: "{{.BACKEND_DIR}}"
+    cmds:
+      - uv run alembic revision --autogenerate -m "{{.MESSAGE}}"
+    vars:
+      MESSAGE: '{{.MESSAGE | default "migration"}}'
+
+  migrate:history:
+    desc: マイグレーション履歴を表示
+    dir: "{{.BACKEND_DIR}}"
+    cmds:
+      - uv run alembic history --verbose
+
+  migrate:downgrade:
+    desc: 1つ前のマイグレーションに戻す
+    dir: "{{.BACKEND_DIR}}"
+    cmds:
+      - uv run alembic downgrade -1
+
   scan:
     desc: インデックス更新を手動実行 (CLI)
     dir: "{{.BACKEND_DIR}}"
     cmds:
-      - python -m app.cli scan
+      - uv run python -m app.cli scan
 
   test:
     desc: 全テスト実行
@@ -57,7 +83,7 @@ tasks:
     desc: バックエンドテスト実行
     dir: "{{.BACKEND_DIR}}"
     cmds:
-      - pytest -v
+      - uv run pytest -v
 
   test:frontend:
     desc: フロントエンド型チェック
@@ -75,8 +101,8 @@ tasks:
     desc: Python Lint
     dir: "{{.BACKEND_DIR}}"
     cmds:
-      - ruff check .
-      - ruff format --check .
+      - uv run ruff check .
+      - uv run ruff format --check .
 
   lint:frontend:
     desc: フロントエンド Lint
@@ -101,10 +127,10 @@ tasks:
     desc: プロダクションモードで起動 (ビルド済みフロントエンドを配信)
     dir: "{{.BACKEND_DIR}}"
     cmds:
-      - uvicorn app.main:app --host 127.0.0.1 --port 8000
+      - uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
 
   db:reset:
-    desc: DB を削除して再作成
+    desc: DB を削除して再作成 (migrate で再生成される)
     cmds:
       - rm -f ./data/doc-explore.db
-      - echo "DB を削除しました。次回起動時に自動作成されます。"
+      - task: migrate
