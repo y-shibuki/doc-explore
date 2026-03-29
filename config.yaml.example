@@ -1,0 +1,26 @@
+# doc-explore 設定ファイル
+# このファイルをコピーして config.yaml を作成し、自分の環境に合わせて編集してください
+# cp config.yaml.example config.yaml
+
+# スキャン対象フォルダ (WSL パスで指定)
+scan_folders:
+  - /mnt/c/Users/username/OneDrive/Documents
+  # - /mnt/c/Users/username/OneDrive/Reports  # 複数フォルダ指定可
+
+# 対象ファイル拡張子 (デフォルトのままで問題なければコメントアウト)
+# target_extensions:
+#   - .docx
+#   - .xlsx
+#   - .xls
+#   - .pdf
+
+# DB ファイルパス
+# db_path: ./data/doc-explore.db
+
+# 起動時に自動スキャンを実行するか
+# auto_scan_on_startup: false
+
+# サーバー設定
+# server:
+#   host: 127.0.0.1
+#   port: 8000

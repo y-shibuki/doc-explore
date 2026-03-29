@@ -1,0 +1,110 @@
+version: '3'
+
+vars:
+  BACKEND_DIR: ./backend
+  FRONTEND_DIR: ./frontend
+
+tasks:
+  install:
+    desc: 全依存関係をインストール
+    cmds:
+      - task: install:backend
+      - task: install:frontend
+
+  install:backend:
+    desc: Python 依存関係をインストール
+    dir: "{{.BACKEND_DIR}}"
+    cmds:
+      - pip install -e ".[dev]"
+
+  install:frontend:
+    desc: Node 依存関係をインストール
+    dir: "{{.FRONTEND_DIR}}"
+    cmds:
+      - npm install
+
+  dev:
+    desc: バックエンド + フロントエンドを同時起動
+    deps:
+      - dev:backend
+      - dev:frontend
+
+  dev:backend:
+    desc: バックエンド開発サーバー起動 (port 8000)
+    dir: "{{.BACKEND_DIR}}"
+    cmds:
+      - uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+
+  dev:frontend:
+    desc: フロントエンド開発サーバー起動 (port 5173)
+    dir: "{{.FRONTEND_DIR}}"
+    cmds:
+      - npx vite --port 5173
+
+  scan:
+    desc: インデックス更新を手動実行 (CLI)
+    dir: "{{.BACKEND_DIR}}"
+    cmds:
+      - python -m app.cli scan
+
+  test:
+    desc: 全テスト実行
+    cmds:
+      - task: test:backend
+      - task: test:frontend
+
+  test:backend:
+    desc: バックエンドテスト実行
+    dir: "{{.BACKEND_DIR}}"
+    cmds:
+      - pytest -v
+
+  test:frontend:
+    desc: フロントエンド型チェック
+    dir: "{{.FRONTEND_DIR}}"
+    cmds:
+      - npx tsc --noEmit
+
+  lint:
+    desc: 全 Lint 実行
+    cmds:
+      - task: lint:backend
+      - task: lint:frontend
+
+  lint:backend:
+    desc: Python Lint
+    dir: "{{.BACKEND_DIR}}"
+    cmds:
+      - ruff check .
+      - ruff format --check .
+
+  lint:frontend:
+    desc: フロントエンド Lint
+    dir: "{{.FRONTEND_DIR}}"
+    cmds:
+      - npx eslint src/
+
+  build:
+    desc: フロントエンドビルド → バックエンドの static/ にコピー
+    cmds:
+      - task: build:frontend
+      - mkdir -p {{.BACKEND_DIR}}/app/static
+      - cp -r {{.FRONTEND_DIR}}/dist/* {{.BACKEND_DIR}}/app/static/
+
+  build:frontend:
+    desc: フロントエンドプロダクションビルド
+    dir: "{{.FRONTEND_DIR}}"
+    cmds:
+      - npx vite build
+
+  start:
+    desc: プロダクションモードで起動 (ビルド済みフロントエンドを配信)
+    dir: "{{.BACKEND_DIR}}"
+    cmds:
+      - uvicorn app.main:app --host 127.0.0.1 --port 8000
+
+  db:reset:
+    desc: DB を削除して再作成
+    cmds:
+      - rm -f ./data/doc-explore.db
+      - echo "DB を削除しました。次回起動時に自動作成されます。"

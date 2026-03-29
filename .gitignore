@@ -1,0 +1,37 @@
+# Config (実環境設定はgit管理しない)
+config.yaml
+
+# Database
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+*.egg
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# Backend static (ビルド成果物)
+backend/app/static/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
