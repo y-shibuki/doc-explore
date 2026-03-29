@@ -14,7 +14,9 @@ WSL上のPythonバックエンドがOneDrive配下の特定フォルダを走査
 |---|---|---|
 | fastapi | 0.115.x | Web API フレームワーク |
 | uvicorn | 0.34.x | ASGI サーバー |
-| aiosqlite | 0.20.x | SQLite 非同期ドライバ |
+| sqlalchemy[asyncio] | 2.0.x | ORM / DB 接続管理 |
+| alembic | 1.14.x | DB マイグレーション |
+| aiosqlite | 0.20.x | SQLite 非同期ドライバ (SQLAlchemy バックエンド) |
 | python-docx | 1.1.x | .docx テキスト抽出 |
 | openpyxl | 3.1.x | .xlsx テキスト抽出 |
 | xlrd | 2.0.x | .xls テキスト抽出 |
@@ -54,27 +56,32 @@ doc-explore/
 │
 ├── backend/
 │   ├── pyproject.toml
+│   ├── alembic.ini                     # Alembic 設定 (DB URL 等)
+│   ├── alembic/
+│   │   ├── env.py                      # マイグレーション実行環境
+│   │   ├── script.py.mako              # リビジョンファイルテンプレート
+│   │   └── versions/                   # マイグレーションファイル群
+│   │       └── xxxx_initial_schema.py  # 初期スキーマ (files, file_content, tags, file_tags, scan_log)
 │   ├── app/
 │   │   ├── __init__.py
 │   │   ├── main.py                 # FastAPI アプリ生成・ライフサイクル
 │   │   ├── config.py               # config.yaml 読み込み・Settings クラス
-│   │   ├── db.py                   # DB 接続管理・マイグレーション
+│   │   ├── db.py                   # SQLAlchemy エンジン・セッション管理
+│   │   ├── sa_models.py            # SQLAlchemy テーブル定義 (DeclarativeBase)
 │   │   ├── models.py               # Pydantic レスポンス/リクエストモデル
-│   │   ├── cli.py                  # task scan 用 CLI エントリポイント
+│   │   ├── cli.py                  # task scan / task migrate 用 CLI エントリポイント
 │   │   ├── routers/
 │   │   │   ├── tree.py             # GET /api/tree
 │   │   │   ├── search.py           # GET /api/search
 │   │   │   ├── files.py            # GET/DELETE /api/files/{id}, POST open
 │   │   │   ├── tags.py             # タグ CRUD + ファイルタグ関連付け
 │   │   │   └── index.py            # POST /api/index/scan, GET /api/index/status
-│   │   ├── services/
-│   │   │   ├── scanner.py          # ファイルシステム走査・差分検出
-│   │   │   ├── extractor.py        # ファイル形式別テキスト抽出
-│   │   │   ├── indexer.py          # DB へのインデックス書き込み・削除
-│   │   │   ├── file_ops.py         # ファイル削除・OS で開く操作
-│   │   │   └── path_utils.py       # WSLパス ↔ Windowsパス変換
-│   │   └── sql/
-│   │       └── schema.sql          # CREATE TABLE 文
+│   │   └── services/
+│   │       ├── scanner.py          # ファイルシステム走査・差分検出
+│   │       ├── extractor.py        # ファイル形式別テキスト抽出
+│   │       ├── indexer.py          # DB へのインデックス書き込み・削除
+│   │       ├── file_ops.py         # ファイル削除・OS で開く操作
+│   │       └── path_utils.py       # WSLパス ↔ Windowsパス変換
 │   └── tests/
 │       ├── conftest.py
 │       ├── test_extractor.py
@@ -149,50 +156,96 @@ doc-explore/
 
 ## DB スキーマ
 
+スキーマは SQLAlchemy モデル (`app/sa_models.py`) で定義し、Alembic マイグレーションで管理する。
+
+### テーブル定義
+
+| テーブル | 説明 |
+|---|---|
+| files | インデックス対象ファイルのメタ情報 |
+| file_content | FTS5 仮想テーブル (全文検索用) |
+| tags | タグマスタ |
+| file_tags | ファイル-タグ関連付け |
+| scan_log | スキャン実行履歴 |
+
+### SQLAlchemy モデルで管理するテーブル (files, tags, file_tags, scan_log)
+
+```python
+# app/sa_models.py (概要)
+class Base(DeclarativeBase): pass
+
+class File(Base):
+    __tablename__ = "files"
+    id: Mapped[int]           # PK AUTOINCREMENT
+    path: Mapped[str]         # UNIQUE, WSL 絶対パス
+    filename: Mapped[str]
+    mtime: Mapped[float]      # Unix timestamp
+    size: Mapped[int]
+    ext: Mapped[str]          # '.docx', '.pdf' 等
+    indexed_at: Mapped[str]   # ISO 8601
+
+class Tag(Base):
+    __tablename__ = "tags"
+    id: Mapped[int]           # PK AUTOINCREMENT
+    name: Mapped[str]         # UNIQUE
+
+class FileTag(Base):
+    __tablename__ = "file_tags"
+    file_id: Mapped[int]      # FK → files.id ON DELETE CASCADE
+    tag_id: Mapped[int]       # FK → tags.id ON DELETE CASCADE
+
+class ScanLog(Base):
+    __tablename__ = "scan_log"
+    id: Mapped[int]
+    started_at: Mapped[str]
+    finished_at: Mapped[str | None]
+    files_added: Mapped[int]
+    files_updated: Mapped[int]
+    files_deleted: Mapped[int]
+    status: Mapped[str]       # 'running'|'completed'|'failed'
+```
+
+### FTS5 仮想テーブル (file_content)
+
+FTS5 仮想テーブルは SQLAlchemy の DDL では表現できないため、Alembic マイグレーション内で `op.execute()` を使って直接 SQL で作成する。
+
 ```sql
-PRAGMA journal_mode=WAL;
-PRAGMA foreign_keys=ON;
-
-CREATE TABLE IF NOT EXISTS files (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    path       TEXT    NOT NULL UNIQUE,  -- WSL 絶対パス
-    filename   TEXT    NOT NULL,
-    mtime      REAL    NOT NULL,         -- Unix timestamp (os.stat().st_mtime)
-    size       INTEGER NOT NULL,
-    ext        TEXT    NOT NULL,         -- '.docx', '.pdf' など (ドット付き小文字)
-    indexed_at TEXT    NOT NULL          -- ISO 8601
-);
-
-CREATE INDEX IF NOT EXISTS idx_files_ext ON files(ext);
-
 CREATE VIRTUAL TABLE IF NOT EXISTS file_content USING fts5(
     file_id UNINDEXED,
     text,
     tokenize='unicode61'
 );
+```
 
-CREATE TABLE IF NOT EXISTS tags (
-    id   INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT    NOT NULL UNIQUE
-);
+### DB マイグレーション管理
 
-CREATE TABLE IF NOT EXISTS file_tags (
-    file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
-    tag_id  INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
-    PRIMARY KEY (file_id, tag_id)
-);
+- **ツール**: Alembic (autogenerate 対応)
+- **設定**: `backend/alembic.ini` (DB URL: `sqlite:///../data/doc-explore.db`)
+- **モデル参照**: `alembic/env.py` で `app.sa_models.Base.metadata` を `target_metadata` に設定
+- **注意**: FTS5 テーブルは autogenerate の対象外。変更時は手動で `op.execute()` を記述する。
 
-CREATE INDEX IF NOT EXISTS idx_file_tags_tag ON file_tags(tag_id);
+**マイグレーション操作コマンド:**
 
-CREATE TABLE IF NOT EXISTS scan_log (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    started_at   TEXT    NOT NULL,
-    finished_at  TEXT,
-    files_added  INTEGER DEFAULT 0,
-    files_updated INTEGER DEFAULT 0,
-    files_deleted INTEGER DEFAULT 0,
-    status       TEXT    NOT NULL DEFAULT 'running'  -- 'running'|'completed'|'failed'
-);
+```bash
+task migrate              # マイグレーション実行 (alembic upgrade head)
+task migrate:create       # 新規リビジョン作成 (MESSAGE="変更内容" task migrate:create)
+task migrate:history      # マイグレーション履歴表示
+task migrate:downgrade    # 1つ前に戻す
+task db:reset             # DB 削除 → migrate で再作成
+```
+
+### PRAGMA 設定
+
+WAL モードと外部キー制約は、マイグレーションではなく SQLAlchemy エンジンの接続イベントで設定する。
+
+```python
+# db.py
+@event.listens_for(engine.sync_engine, "connect")
+def set_sqlite_pragma(dbapi_conn, connection_record):
+    cursor = dbapi_conn.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.close()
 ```
 
 **FTS5 日本語検索の方針:**
@@ -265,7 +318,9 @@ name = "doc-explore-backend"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",
-    "uvicorn>=0.34",
+    "uvicorn[standard]>=0.34",
+    "sqlalchemy[asyncio]>=2.0",
+    "alembic>=1.14",
     "aiosqlite>=0.20",
     "python-docx>=1.1",
     "openpyxl>=3.1",
@@ -284,9 +339,12 @@ dev = ["ruff>=0.9", "pytest>=8.3", "pytest-asyncio>=0.25", "httpx>=0.28"]
 
 ### Phase 1: 基盤（DB + 設定 + FastAPI 骨格）
 - ディレクトリ構造、pyproject.toml、Taskfile.yml
-- DB 接続管理・スキーマ作成（schema.sql）
+- SQLAlchemy モデル定義 (`app/sa_models.py`)
+- Alembic 初期マイグレーション作成 (通常テーブル + FTS5 `op.execute()`)
+- `alembic/env.py` に `target_metadata` 設定
+- DB 接続管理 (`app/db.py`: エンジン・セッション・PRAGMA 設定)
 - config.yaml 読み込み
-- `GET /api/config` で動作確認
+- `task migrate` で DB 初期化 → `GET /api/config` で動作確認
 
 ### Phase 2: テキスト抽出 + インデックス
 - `services/extractor.py`: docx/xlsx/xls/pdf 各形式の抽出
@@ -327,10 +385,90 @@ dev = ["ruff>=0.9", "pytest>=8.3", "pytest-asyncio>=0.25", "httpx>=0.28"]
 
 | Phase | 確認コマンド / 操作 |
 |---|---|
-| 1 | `task dev:backend` → `curl localhost:8000/api/config` |
+| 1 | `task migrate` → DB 作成確認 → `task dev:backend` → `curl localhost:8000/api/config` |
 | 2 | `curl -X POST localhost:8000/api/index/scan` → DB にファイル登録確認 |
 | 3 | `curl "localhost:8000/api/search?q=テスト"` → 結果返却確認 |
 | 4 | `curl -X POST localhost:8000/api/files/1/open` → エクスプローラで開く |
 | 5 | `task dev:frontend` → ブラウザでツリー展開動作確認 |
 | 6 | 検索 → ツリージャンプの E2E 動作確認 |
 | 7 | `task build` → `task start` → `localhost:8000` で全機能確認 |
+
+---
+
+## DB 初期化・マイグレーション運用
+
+### 初回セットアップ
+
+```bash
+task install           # 依存関係インストール (uv sync --extra dev)
+cp config.yaml.example config.yaml
+# config.yaml を編集
+task migrate           # DB 作成 + 全マイグレーション適用
+task dev               # 開発サーバー起動
+```
+
+`task migrate` は `uv run alembic upgrade head` を実行する。DB ファイルが存在しない場合、SQLite が自動的にファイルを作成し、全マイグレーションが順に適用される。
+
+### スキーマ変更時の手順
+
+1. `app/sa_models.py` のモデルを変更
+2. `MESSAGE="変更内容" task migrate:create` で autogenerate リビジョン作成
+3. 生成されたマイグレーションファイルを確認・修正 (FTS5 関連は手動追記)
+4. `task migrate` で適用
+5. マイグレーションファイルを git commit
+
+### 開発サーバー起動時の DB 初期化
+
+`task dev:backend` は Alembic マイグレーションを自動実行しない。DB が未作成の場合はエラーになるため、初回は必ず `task migrate` を先に実行すること。起動時に自動マイグレーションを行わない理由:
+
+- 意図しないスキーマ変更を防ぐ
+- マイグレーションの適用は明示的な操作として行うべき
+
+### `task scan` (CLI) 実行時の前提
+
+`task scan` もマイグレーション済みの DB が存在することを前提とする。DB 未作成の場合はエラーメッセージで `task migrate` の実行を促す。
+
+### DB リセット
+
+```bash
+task db:reset    # data/doc-explore.db を削除 → task migrate で再作成
+```
+
+### テスト環境での DB セットアップ
+
+テストでは本番 DB ファイルを使わず、インメモリ SQLite またはテンポラリファイルを使用する。
+
+```python
+# tests/conftest.py
+@pytest.fixture
+async def db_session():
+    engine = create_async_engine("sqlite+aiosqlite://", echo=False)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+        # FTS5 テーブルは run_sync 内で直接 SQL 実行
+        await conn.execute(text(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS file_content "
+            "USING fts5(file_id UNINDEXED, text, tokenize='unicode61')"
+        ))
+    async with AsyncSession(engine) as session:
+        yield session
+    await engine.dispose()
+```
+
+テスト環境では Alembic を経由せず `Base.metadata.create_all()` で直接テーブルを作成する。理由:
+
+- テストの実行速度を優先
+- テストごとにクリーンな DB が必要
+- マイグレーション自体のテストは別途行う (マイグレーションの up/down が正常に動くことを確認)
+
+### CI での DB セットアップ
+
+```yaml
+# CI ステップ例
+- task install:backend
+- task migrate          # CI 用 DB にマイグレーション適用
+- task test:backend     # テスト実行 (テストは独自のインメモリ DB を使用)
+- task lint:backend
+```
+
+CI ではマイグレーションの適用可能性を検証するために `task migrate` を実行する。ただしテスト自体はインメモリ DB を使うため、`task migrate` で作られた DB はテストには使われない。これにより「マイグレーションが壊れていないこと」と「アプリロジックの正しさ」を独立して検証できる。
